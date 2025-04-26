@@ -1,0 +1,7 @@
+node_modules
+.env
+generate-key.js
+my-keypair.json
+backend/index1.js
+backend/index2.js
+frontend/index2.html

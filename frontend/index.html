@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FastChain Token Sale</title>
+</head>
+<body> 
+  <h1>FastChain Token Sale</h1>
+  <button id="connect">Connect Wallet</button>
+  <button id="buy">Buy FastChains</button>
+
+  <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.js"></script>
+
+  <script>
+    const connection = new solanaWeb3.Connection(solanaWeb3.clusterApiUrl('mainnet-beta'));
+    let wallet = null;
+
+    document.getElementById('connect').addEventListener('click', async () => {
+      if (window.solana && window.solana.isPhantom) {
+        try {
+          const resp = await window.solana.connect();
+          wallet = resp.publicKey.toString();
+          alert('Connected: ' + wallet);
+        } catch (err) {
+          console.error('Connection error', err);
+        }
+      } else {
+        alert('Phantom not found. Install it!');
+      }
+    });
+
+    document.getElementById('buy').addEventListener('click', async () => {
+      if (!wallet) return alert('Please connect wallet first');
+
+      try {
+        // Крок 1: Отримати транзакцію SOL на сервері
+        const txRes = await fetch('http://localhost:3001/get-transaction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ buyer: wallet })
+        });
+
+        const txData = await txRes.json();
+
+        if (!txData.transaction) {
+          throw new Error(txData.error || 'No transaction received');
+        }
+
+        const transaction = solanaWeb3.Transaction.from(Uint8Array.from(atob(txData.transaction), c => c.charCodeAt(0)));
+
+        const signedTx = await window.solana.signTransaction(transaction);
+        const txSig = await connection.sendRawTransaction(signedTx.serialize());
+        await connection.confirmTransaction(txSig);
+
+        // Крок 2: Повідомити сервер, що SOL відправлено, видай токени
+        const tokenRes = await fetch('http://localhost:3001/send-tokens', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ buyer: wallet })
+        });
+
+        const tokenData = await tokenRes.json();
+
+        if (tokenData.success) {
+          alert('✅ Token sent!');
+        } else {
+          alert('❌ Token transfer failed: ' + tokenData.error);
+        }
+      } catch (e) {
+        console.error(e);
+        alert('Error during transaction');
+      }
+    });
+  </script>
+</body>
+</html>
