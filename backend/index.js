@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Connection, Keypair, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
-const { getOrCreateAssociatedTokenAccount, transfer, getAccount } = require('@solana/spl-token');
+const { getOrCreateAssociatedTokenAccount, createTransferInstruction, getMint, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+const nacl = require('tweetnacl');
 
 const app = express();
 const port = 3001;
@@ -10,152 +11,183 @@ const port = 3001;
 app.use(cors());
 app.use(express.json());
 
-const secretKey = Uint8Array.from(JSON.parse(process.env.PRIVATE_KEY));
+// Налаштування ключа payer
+let secretKey;
+try {
+  if (!process.env.PRIVATE_KEY) {
+    throw new Error('PRIVATE_KEY не визначено у .env');
+  }
+  secretKey = Uint8Array.from(JSON.parse(process.env.PRIVATE_KEY));
+} catch (e) {
+  console.error('❌ Помилка: Некоректний PRIVATE_KEY у .env:', e.message);
+  process.exit(1);
+}
 const payer = Keypair.fromSecretKey(secretKey);
-
-// Виводимо публічний ключ payer для перевірки
 console.log('Payer Public Key:', payer.publicKey.toBase58());
 
-// Підключення до Devnet
-const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+// Підключення до Helius
+const connection = new Connection('https://mainnet.helius-rpc.com/?api-key=f6c43c4f-5764-4355-8cd2-30fed87b2519', 'confirmed');
 
-// Перевірка валідності токена
+// Перевірка адреси токена
 let MINT_ADDRESS;
 try {
   MINT_ADDRESS = new PublicKey(process.env.TOKEN_MINT);
   console.log('Token Mint Address:', MINT_ADDRESS.toBase58());
 } catch (e) {
-  console.error('❌ ERROR: Invalid TOKEN_MINT address in .env');
+  console.error('❌ Помилка: Некоректна адреса TOKEN_MINT у .env');
   process.exit(1);
 }
 
+// Перевірка балансу payer
+async function checkPayerBalance() {
+  const balance = await connection.getBalance(payer.publicKey);
+  console.log('💰 Баланс Payer:', balance / 1e9, 'SOL');
+  if (balance < 0.002 * 1e9) {
+    console.warn('⚠️ Увага: Недостатньо SOL на рахунку payer');
+  }
+}
+checkPayerBalance();
+
+// Тестування підпису payer
+function testPayerSignature() {
+  try {
+    const message = Buffer.from('test');
+    const signature = nacl.sign.detached(message, payer.secretKey);
+    console.log('Тестовий підпис payer:', Buffer.from(signature).toString('hex'));
+  } catch (e) {
+    console.error('❌ Помилка при створенні тестового підпису:', e);
+  }
+}
+testPayerSignature();
+
+// Ендпоінт для створення транзакції
 app.post('/get-transaction', async (req, res) => {
   try {
     const buyerAddress = new PublicKey(req.body.buyer);
     console.log('Buyer Address:', buyerAddress.toBase58());
 
-    // Перевіряємо баланс payer
-    const payerBalance = await connection.getBalance(payer.publicKey);
-    console.log('Payer Balance:', payerBalance / 1e9, 'SOL');
-    if (payerBalance < 0.002 * 1e9) {
-      throw new Error('Insufficient SOL in payer account');
-    }
-
     const latestBlockhash = await connection.getLatestBlockhash();
+    console.log('Latest Blockhash:', latestBlockhash.blockhash);
 
-    // Створюємо транзакцію
-    const transaction = new Transaction({
-      recentBlockhash: latestBlockhash.blockhash,
-      feePayer: buyerAddress,
+    const transaction = new Transaction();
+    transaction.recentBlockhash = latestBlockhash.blockhash;
+    transaction.feePayer = buyerAddress;
+
+    // Додавання інструкції SystemProgram.transfer
+    const transferInstruction = SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: buyerAddress,
+      lamports: 1e6 // 0.001 SOL
+    });
+    transaction.add(transferInstruction);
+
+    // Логування транзакції до підпису
+    console.log('Transaction before signing:', {
+      recentBlockhash: transaction.recentBlockhash,
+      feePayer: transaction.feePayer?.toBase58(),
+      instructions: transaction.instructions.map(i => ({
+        programId: i.programId.toBase58(),
+        data: i.data.toString('hex'),
+        keys: i.keys.map(k => k.pubkey.toBase58())
+      }))
     });
 
-    // Додаємо переказ SOL
-    transaction.add(
-      SystemProgram.transfer({
-        fromPubkey: buyerAddress,
-        toPubkey: payer.publicKey,
-        lamports: BigInt(100), // 0.001 SOL, використовуємо BigInt для коректних операцій
-      })
-    );
+    // Встановлення порядку підписантів (payer перший, buyer другий)
+    transaction.setSigners(payer.publicKey, buyerAddress);
 
-    // Перевіряємо токен-акаунт для buyer
-    console.log('Creating token account for buyer:', buyerAddress.toBase58());
-    let toTokenAccount;
-    try {
-      toTokenAccount = await getOrCreateAssociatedTokenAccount(
-        connection,
-        payer,
-        MINT_ADDRESS,
-        buyerAddress
-      );
-      console.log('Token account created:', toTokenAccount.address.toBase58());
-    } catch (error) {
-      console.error('Failed to create token account for buyer:', error);
-      throw new Error('Cannot create token account for buyer: ' + error.message);
-    }
+    // Підпис транзакції payer
+    transaction.partialSign(payer);
 
-    const serializedTx = transaction.serialize({
+    // Логування підписів
+    console.log('Transaction signatures:', transaction.signatures.map(s => ({
+      publicKey: s.publicKey.toBase58(),
+      signature: s.signature ? s.signature.toString('hex') : 'null'
+    })));
+
+    // Серіалізація транзакції
+    const serializedTransaction = transaction.serialize({
       requireAllSignatures: false,
-      verifySignatures: false,
+      verifySignatures: false
     });
 
-    res.send({ transaction: serializedTx.toString('base64') });
+    console.log('Serialized transaction length:', serializedTransaction.length);
+
+    res.send({
+      transaction: Buffer.from(serializedTransaction).toString('base64'),
+      recentBlockhash: latestBlockhash.blockhash
+    });
   } catch (error) {
-    console.error('Transaction creation error:', error);
+    console.error('Помилка створення транзакції:', error);
     res.status(500).send({ success: false, error: error.message });
   }
 });
 
+// Ендпоінт для відправки токенів
 app.post('/send-tokens', async (req, res) => {
   try {
     const buyer = new PublicKey(req.body.buyer);
-    const amount = BigInt(1); // Кількість токенів, використовуємо BigInt для коректних операцій
+    console.log('Buyer Address:', buyer.toBase58());
 
-    // Перевіряємо баланс payer
     const payerBalance = await connection.getBalance(payer.publicKey);
-    console.log('Payer Balance:', payerBalance / 1e9, 'SOL');
+    console.log('💰 Payer SOL balance:', payerBalance / 1e9, 'SOL');
     if (payerBalance < 0.002 * 1e9) {
-      throw new Error('Insufficient SOL in payer account');
+      throw new Error('Недостатньо SOL на рахунку payer');
     }
 
-    // Перевіряємо токен-акаунт для payer
-    let fromTokenAccount;
-    try {
-      fromTokenAccount = await getOrCreateAssociatedTokenAccount(
-        connection,
-        payer,
-        MINT_ADDRESS,
-        payer.publicKey
-      );
-      console.log('Payer token account:', fromTokenAccount.address.toBase58());
-    } catch (error) {
-      console.error('Failed to create token account for payer:', error);
-      throw new Error('Cannot create token account for payer: ' + error.message);
-    }
+    // Отримання інформації про токен
+    const mintInfo = await getMint(connection, MINT_ADDRESS);
+    const decimals = mintInfo.decimals;
+    console.log('🔢 Token decimals:', decimals);
 
-    // Перевіряємо баланс токенів
-    const tokenAccountInfo = await getAccount(connection, fromTokenAccount.address);
-console.log('Payer token balance:', tokenAccountInfo.amount); // Логуємо баланс
-    //console.log('Payer token balance:', tokenAccountInfo.amount / Math.pow(10, 9)); // Якщо 9 десяткових знаків
+    // Сума в токенах (1 токен)
+    const tokenAmount = 1 * 10 ** decimals;
 
-    if (Number(tokenAccountInfo.amount) < Number(amount) * 1e9) { // Перевіряємо, чи достатньо токенів
-      //throw new Error(`Insufficient token balance: ${Number(tokenAccountInfo.amount) / 1e9} tokens available, ${amount} required`);
-    }
-
-    // Перевіряємо токен-акаунт для buyer
-    console.log('Creating token account for buyer:', buyer.toBase58());
-    let toTokenAccount;
-    try {
-      toTokenAccount = await getOrCreateAssociatedTokenAccount(
-        connection,
-        payer,
-        MINT_ADDRESS,
-        buyer
-      );
-      console.log('Buyer token account:', toTokenAccount.address.toBase58());
-    } catch (error) {
-      console.error('Failed to create token account for buyer:', error);
-      throw new Error('Cannot create token account for buyer: ' + error.message);
-    }
-
-    // Переказ токенів
-    console.log('Transferring tokens:', amount);
-    const signature = await transfer(
+    // Акаунт відправника
+    const senderTokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
       payer,
-      fromTokenAccount.address,
-      toTokenAccount.address,
-      payer.publicKey,
-      amount // Кількість у найменших одиницях (з урахуванням decimals)
+      MINT_ADDRESS,
+      payer.publicKey
     );
 
+    // Акаунт одержувача
+    const recipientTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      payer,
+      MINT_ADDRESS,
+      buyer
+    );
+
+    // Створення інструкції переказу токенів
+    const transferIx = createTransferInstruction(
+      senderTokenAccount.address,
+      recipientTokenAccount.address,
+      payer.publicKey,
+      tokenAmount,
+      [],
+      TOKEN_PROGRAM_ID
+    );
+
+    // Створення транзакції
+    const transaction = new Transaction().add(transferIx);
+    const latestBlockhash = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = latestBlockhash.blockhash;
+    transaction.feePayer = payer.publicKey;
+
+    // Підпис і відправка транзакції
+    const signature = await connection.sendTransaction(transaction, [payer], {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+
+    console.log('✅ Токени надіслано. Підпис:', signature);
     res.send({ success: true, signature });
   } catch (error) {
-    console.error('Token transfer error:', error);
+    console.error('❌ Помилка переказу токенів:', error);
     res.status(500).send({ success: false, error: error.message });
   }
 });
 
 app.listen(port, () => {
-  console.log(`✅ Backend listening at http://localhost:${port}`);
+  console.log(`✅ Бекенд запущено на http://localhost:${port}`);
 });
