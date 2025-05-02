@@ -79,9 +79,9 @@ app.post('/get-transaction', async (req, res) => {
     
     // Додавання інструкції SystemProgram.transfer
     const transferInstruction = SystemProgram.transfer({
-      fromPubkey: payer.publicKey,
-      toPubkey: buyerAddress,
-      lamports: Math.floor(solAmount * 1e9) // 0.001 SOL
+      fromPubkey: buyerAddress,     // покупець
+      toPubkey: payer.publicKey,    // продавець (ви)
+      lamports: Math.floor(solAmount * 1e9)
     });
     transaction.add(transferInstruction);
 
