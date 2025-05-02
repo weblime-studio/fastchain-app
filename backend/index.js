@@ -138,8 +138,7 @@ app.post('/send-tokens', async (req, res) => {
       throw new Error('Недостатньо SOL на рахунку payer');
     }
 
-    const tokenAmountRaw = parseFloat(req.body.tokenAmount || '1')
-    const tokenAmount = Math.floor(tokenAmountRaw * 10 ** decimals)
+    
     
     // Отримання інформації про токен
     const mintInfo = await getMint(connection, MINT_ADDRESS);
@@ -147,6 +146,8 @@ app.post('/send-tokens', async (req, res) => {
     console.log('🔢 Token decimals:', decimals);
 
     // Сума в токенах (1 токен)
+    const tokenAmountRaw = parseFloat(req.body.tokenAmount || '1')
+    const tokenAmount = Math.floor(tokenAmountRaw * 10 ** decimals)
     //const tokenAmount = 1 * 10 ** decimals;
 
     // Акаунт відправника
