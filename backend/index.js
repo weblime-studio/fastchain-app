@@ -147,7 +147,7 @@ app.post('/send-tokens', async (req, res) => {
     console.log('🔢 Token decimals:', decimals);
 
     // Сума в токенах (1 токен)
-    const tokenAmount = 1 * 10 ** decimals;
+    //const tokenAmount = 1 * 10 ** decimals;
 
     // Акаунт відправника
     const senderTokenAccount = await getOrCreateAssociatedTokenAccount(
