@@ -72,12 +72,16 @@ app.post('/get-transaction', async (req, res) => {
     const transaction = new Transaction();
     transaction.recentBlockhash = latestBlockhash.blockhash;
     transaction.feePayer = buyerAddress;
+    
+    
+    const solAmount = parseFloat(req.body.solAmount || '0.001')
 
+    
     // Додавання інструкції SystemProgram.transfer
     const transferInstruction = SystemProgram.transfer({
       fromPubkey: payer.publicKey,
       toPubkey: buyerAddress,
-      lamports: 1e6 // 0.001 SOL
+      lamports: Math.floor(solAmount * 1e9) // 0.001 SOL
     });
     transaction.add(transferInstruction);
 
@@ -134,6 +138,9 @@ app.post('/send-tokens', async (req, res) => {
       throw new Error('Недостатньо SOL на рахунку payer');
     }
 
+    const tokenAmountRaw = parseFloat(req.body.tokenAmount || '1')
+    const tokenAmount = Math.floor(tokenAmountRaw * 10 ** decimals)
+    
     // Отримання інформації про токен
     const mintInfo = await getMint(connection, MINT_ADDRESS);
     const decimals = mintInfo.decimals;
